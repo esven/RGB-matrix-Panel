@@ -77,8 +77,13 @@ class RGBmatrixPanel : public Adafruit_GFX {
 #if defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
   uint8_t  rgbpins[6];                      // Pin numbers for 2x R,G,B bits
   volatile PortType *outsetreg, *outclrreg; // PORT bit set, clear registers
-  PortType           rgbclkmask;            // Mask of all RGB bits + CLK
   PortType           expand[256];           // 6-to-32 bit converter table
+  PortType           rgbclkmask;            // Mask of all RGB bits + CLK
+#if defined(ARDUINO_ARCH_ESP32)
+  volatile PortType *out1setreg, *out1clrreg; // PORT bit set, clear registers
+  PortType           expand1[256];           // 6-to-32 bit converter table
+  PortType           rgb1nclkmask;            // Mask of all RGB bits + CLK
+#endif
 #endif
 
   // Counters/pointers for interrupt handler:

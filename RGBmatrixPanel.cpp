@@ -106,7 +106,8 @@ void RGBmatrixPanel::init(uint8_t rows, uint8_t a, uint8_t b, uint8_t c,
   ) {
 #if defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
   // R1, G1, B1, R2, G2, B2 pins
-  static const uint8_t defaultrgbpins[] = { 2,3,4,5,6,7 };
+//  static const uint8_t defaultrgbpins[] = { 2,3,4,5,6,7 };
+  static const uint8_t defaultrgbpins[] = { 32,14,15,27,33,12 };
   memcpy(rgbpins, pinlist ? pinlist : defaultrgbpins, sizeof rgbpins);
 #if defined(ARDUINO_ARCH_SAMD)
   // All six RGB pins MUST be on the same PORT # as CLK
@@ -252,21 +253,34 @@ void RGBmatrixPanel::begin(void) {
     if(i & 0x80) expand[i] |= rgbmask[5];
   }
 #elif defined(ARDUINO_ARCH_ESP32)
-  // Semi-configurable RGB bits; must be on same PORT as CLK
+  bool clkfirst;
+  // Define GPIO Register with CLK as first outreg to avoid resetting RGB
+  // pins before resetting CLK.
   if (_clk < 32) {
+    clkfirst = true;
 	  outsetreg = &GPIO.out_w1ts;
 	  outclrreg = &GPIO.out_w1tc;
+    out1setreg =  (volatile PortType*) &(GPIO.out1_w1ts);
+    out1clrreg =  (volatile PortType*) &(GPIO.out1_w1tc);
   } else {
-	  outsetreg =  (volatile PortType*) &(GPIO.out1_w1ts);
-	  outclrreg =  (volatile PortType*) &(GPIO.out1_w1tc);
-  }
+    clkfirst = false;
+    outsetreg =  (volatile PortType*) &(GPIO.out1_w1ts);
+    outclrreg =  (volatile PortType*) &(GPIO.out1_w1tc);
+    out1setreg = &GPIO.out_w1ts;
+    out1clrreg = &GPIO.out_w1tc;
+	}
 
-    PortType rgbmask[6];
+    PortType rgbmask[6], rgb1mask[6];
     clkmask = rgbclkmask = digitalPinToBitMask(_clk);
     for(uint8_t i=0; i<6; i++) {
       pinMode(rgbpins[i], OUTPUT);
-      rgbmask[i]  = digitalPinToBitMask(rgbpins[i]); // Pin bit mask
-      rgbclkmask |= rgbmask[i];                      // Add to RGB+CLK bit mask
+      if ((rgbpins[i] < 32 && clkfirst == true) || (rgbpins[i] >= 32 && clkfirst == false)) {
+        rgbmask[i]  = digitalPinToBitMask(rgbpins[i]); // Pin bit mask
+        rgbclkmask |= rgbmask[i];                      // Add to RGB+CLK bit mask
+      } else {
+        rgb1mask[i]  = digitalPinToBitMask(rgbpins[i]); // Pin bit mask
+        rgb1nclkmask |= rgbmask[i];                      // Add to RGB+CLK bit mask
+      }
     }
     for(int i=0; i<256; i++) {
       expand[i] = 0;
@@ -276,8 +290,15 @@ void RGBmatrixPanel::begin(void) {
       if(i & 0x20) expand[i] |= rgbmask[3];
       if(i & 0x40) expand[i] |= rgbmask[4];
       if(i & 0x80) expand[i] |= rgbmask[5];
+      expand1[i] = 0;
+      if(i & 0x04) expand1[i] |= rgb1mask[0];
+      if(i & 0x08) expand1[i] |= rgb1mask[1];
+      if(i & 0x10) expand1[i] |= rgb1mask[2];
+      if(i & 0x20) expand1[i] |= rgb1mask[3];
+      if(i & 0x40) expand1[i] |= rgb1mask[4];
+      if(i & 0x80) expand1[i] |= rgb1mask[5];
     }
-#endif
+#endif // defined(ARDUINO_ARCH_ESP32)
 
 #if defined(ARDUINO_ARCH_ESP32)
     timer_config_t tim_config;
@@ -299,7 +320,7 @@ void RGBmatrixPanel::begin(void) {
     		(void *) TIMER_0, ESP_INTR_FLAG_IRAM, NULL);
 
     timer_start(TIMER_GROUP_1, TIMER_0);
-#endif
+#endif // defined(ARDUINO_ARCH_ESP32)
 
 #if defined(__AVR__)
   // Set up Timer1 for interrupt:
@@ -308,7 +329,7 @@ void RGBmatrixPanel::begin(void) {
   ICR1    = 100;
   TIMSK1 |= _BV(TOIE1); // Enable Timer1 interrupt
   sei();                // Enable global interrupts
-#endif
+#endif // defined(__AVR__)
 
 #if defined(ARDUINO_ARCH_SAMD)
 #ifdef __SAMD51__
@@ -708,6 +729,9 @@ void RGBmatrixPanel::updateDisplay(void) {
 #endif
   uint8_t  i, tick, tock, *ptr;
   uint16_t t, duration;
+#if defined(ARDUINO_ARCH_ESP32)
+  uint8_t *ptr1;
+#endif
 
   *oeport  |= oemask;  // Disable LED output during row/plane switchover
   *latport |= latmask; // Latch data loaded during *prior* interrupt
@@ -756,7 +780,8 @@ void RGBmatrixPanel::updateDisplay(void) {
 
   // buffptr, being 'volatile' type, doesn't take well to optimization.
   // A local register copy can speed some things up:
-  ptr = (uint8_t *)buffptr;
+  ptr  = (uint8_t *)buffptr;
+  ptr1 = (uint8_t *)buffptr;
 
 #if defined(__AVR__)
   ICR1      = duration; // Set interval for next interrupt
@@ -826,6 +851,13 @@ void RGBmatrixPanel::updateDisplay(void) {
       *outsetreg = expand[*ptr++]; \
       *outsetreg = clkmask;
 #endif
+#elif defined(ARDUINO_ARCH_ESP32)
+    #define pew                       \
+      *outclrreg  = rgbclkmask;       \
+      *out1clrreg = rgb1nclkmask;     \
+      *outsetreg  = expand[*ptr++];   \
+      *out1setreg = expand1[*ptr1++]; \
+      *outsetreg  = clkmask;
 #endif
 
     // Loop is unrolled for speed:
@@ -866,10 +898,10 @@ void RGBmatrixPanel::updateDisplay(void) {
       CLKPORT = tick; // Clock lo
       CLKPORT = tock; // Clock hi
     } 
-#elif defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_ESP32)
+#elif defined(ARDUINO_ARCH_SAMD)
     for (int i=0; i<WIDTH; i++) {
       byte b = 
-	( ptr[i]         << 6)         |
+  ( ptr[i]         << 6)         |
         ((ptr[i+WIDTH]   << 4) & 0x30) |
         ((ptr[i+WIDTH*2] << 2) & 0x0C);
 
@@ -878,7 +910,20 @@ void RGBmatrixPanel::updateDisplay(void) {
       *outsetreg = clkmask;    // Set clock high
     }
     *outclrreg = clkmask;      // Set clock low
+#elif defined(ARDUINO_ARCH_ESP32)
+    for (int i=0; i<WIDTH; i++) {
+      byte b = 
+  ( ptr[i]         << 6)         |
+        ((ptr[i+WIDTH]   << 4) & 0x30) |
+        ((ptr[i+WIDTH*2] << 2) & 0x0C);
+
+      *outclrreg  = rgbclkmask;   // Clear all data and clock bits together
+      *out1clrreg = rgb1nclkmask; // Clear all data and clock bits together
+      *outsetreg  = expand[b];    // Set new data bits
+      *out1setreg = expand1[b];   // Set new data bits
+      *outsetreg  = clkmask;      // Set clock high
+    }
+    *outclrreg = clkmask;         // Set clock low
 #endif
   }
 }
-
